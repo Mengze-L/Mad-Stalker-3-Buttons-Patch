@@ -1,1 +1,1 @@
-..\fixheader.exe "OUTPUT\MADS (Mengze).bin"
+TOOLS\fixheader.exe "OUTPUT\MADS (Mengze).bin"
