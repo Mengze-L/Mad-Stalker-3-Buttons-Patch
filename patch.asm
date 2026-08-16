@@ -32,6 +32,12 @@
         org     ORIGIN_SYSTEM_CLEAR_COUNT
         dc.w    $005F
 
+; Stage Clear originally exposes all 28 Window rows.  Rows 3-27 now contain
+; sprite-HUD pattern pixels, not name-table words, so keep the Window hidden;
+; the Stage Clear and bonus lettering is already sprite-based.
+        org     ORIGIN_STAGE_CLEAR_WINDOW_IMM
+        dc.w    $9200
+
         org     ORIGIN_LEVEL_WINDOW_IMM
         dc.w    $9200
 
@@ -45,8 +51,8 @@
         jmp     HUD_GAME2_FRAME
         nop
 
-; Replace the original Window-based pause display with a pause-only SAT
-; overlay.  The gameplay/HUD sprite list remains frozen while paused.
+; Replace the original Window-based pause display by blinking PAUSE through the
+; five left SCORE patterns.  The complete sprite list remains frozen.
         org     ORIGIN_PAUSE_ENTRY
         jmp     HUD_PAUSE_ROUTINE
 
@@ -60,6 +66,16 @@
 ; the battle engine.  The selection screen itself keeps its original setup.
         org     ORIGIN_VS_WINDOW_IMM
         dc.w    $9200
+
+; The original VS result code uploads the two-tile round medal at $1980,
+; which is now the left SCORE sprite's O column.  Redirect both winner paths
+; to the VS-only $1800/$1820 tile pair.  The hidden Window makes its original
+; $CC/$CD name-table references harmless; sprite records reproduce them.
+        org     ORIGIN_VS_MEDAL_UPLOAD1_IMM
+        dc.l    HUD_VS_MEDAL_VDP_COMMAND
+
+        org     ORIGIN_VS_MEDAL_UPLOAD2_IMM
+        dc.l    HUD_VS_MEDAL_VDP_COMMAND
 
 ; Preserve all logical HUD behavior while mirroring its cells into sprite art.
         org     ORIGIN_WINDOW_WRITE

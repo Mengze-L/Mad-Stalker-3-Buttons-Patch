@@ -19,10 +19,14 @@ ORIGIN_HUD_RESET_GAME2        equ $00128568
 ORIGIN_HUD_RESET_GAME2_CONT   equ $0012856E
 
 ORIGIN_PAUSE_ENTRY            equ $000FD006
+ORIGIN_STAGE_CLEAR_WINDOW_IMM equ $000D880C
 ORIGIN_LEVEL_WINDOW_IMM       equ $000D8CCC
 ORIGIN_GAME1_WINDOW_IMM       equ $0012652E
 ORIGIN_GAME2_WINDOW_IMM       equ $001269EC
 ORIGIN_VS_WINDOW_IMM          equ $00127BFC
+ORIGIN_VS_MEDAL_UPLOAD1_IMM   equ $000F7DA0
+ORIGIN_VS_MEDAL_UPLOAD2_IMM   equ $000F7E66
+ORIGIN_VS_MEDAL_ART           equ $000F7CDA
 
 ORIGIN_WINDOW_WRITE           equ $00133A58
 ORIGIN_WINDOW_BLANK           equ $00133A86
@@ -66,7 +70,16 @@ HUD_SEED_SPRITES              equ $001FD1E0
 HUD_LINK_SPRITES              equ $001FD240
 HUD_PAUSE_ROUTINE             equ $001FD2A0
 HUD_PREPARED_PAUSE            equ $001FD500
+HUD_STAGE_CLEAR_NUMBERS       equ $001FD5A0
 HUD_DASH_GUARD                equ $001FD9A0
+
+HUD_PAUSE_VISIBLE_FRAMES      equ 30
+HUD_PAUSE_HIDDEN_FRAMES       equ 15
+HUD_FRAME_VS                  equ $56
+HUD_FRAME_STAGE_CLEAR         equ $5A
+HUD_VS_MEDAL_VRAM             equ $1800
+HUD_VS_MEDAL_VDP_COMMAND      equ $58000000
+HUD_VS_MEDAL_TILE             equ $00C0
 
 BUTTON_HEAVY_PUNCH            equ $01
 BUTTON_LIGHT_PUNCH            equ $02
@@ -77,10 +90,6 @@ ACTION_VAR                    equ $FFFFC66C
 DASH_VAR                      equ $FFFFDD3C
 LIGHT_PUNCH_VAR               equ $FFFFC6F8
 PLAYER_INDEX_VAR              equ $FFFFB900
-
-SPRITE_TABLE_VRAM             equ $1000
-PAUSE_SPRITE_VRAM             equ $1200
-PAUSE_PATTERN_VRAM            equ $1280
 
 ; Address-shaped key retained from the original HUD layout.  It is used only
 ; to index the RAM shadow; patched HUD routines never access it as VRAM.
@@ -95,6 +104,7 @@ HUD_TIMER_VALID               equ $FFFFF682
 HUD_LINKS_VALID               equ $FFFFF683
 HUD_CELL_DIRTY                equ $FFFFF684
 HUD_CELL_VALID                equ $FFFFF68D
+HUD_FRAME_SEEDED              equ $FFFFF695
 HUD_CELL_SHADOW               equ $FFFFF696
 HUD_QUEUE_COUNT               equ $FFFFF70E
 HUD_QUEUE_DATA                equ $FFFFF70F
