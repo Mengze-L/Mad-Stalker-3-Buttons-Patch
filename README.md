@@ -11,15 +11,28 @@ story and versus modes, and adds a dedicated guard button.
 - Preserves the player score, health bar, timeout, `HI SCORE`, high-score
   digits, and enemy/boss health bar.
 - Supports story, `COM VS`, and `VS` gameplay modes.
+- Reproduces the original per-side VS round-win medallions as sprites without
+  overwriting the left `SCORE` graphics.
 - Uses prepared transparent HUD graphics, so black background pixels do not
   cover the playfield.
-- Replaces the Window-layer pause display with two temporary `PAUSE` sprites.
-- Keeps the HUD and gameplay sprites frozen while paused.
+- Replaces the five left `SCORE` letter patterns with a blinking `PAUSE` while
+  paused; it consumes no extra sprite-table entries.
+- Keeps the timer, score values, health bars, high-score HUD, and gameplay
+  sprites frozen and visible while paused, then restores a steady `SCORE` on
+  unpause.
 - Initializes the player health bar when gameplay begins.
 - Uses a RAM HUD shadow, direct cell lookup, changed-cell queue, cached timer
   digits, and a limited VBlank update budget.
 - Avoids rebuilding unchanged HUD sprite records and links every frame.
+- Uses the HUD fast linker only on frames explicitly seeded by a gameplay
+  wrapper; cutscenes and menus retain the original complete sprite linker.
 - Works with 68000 address-error emulation enabled, including Genesis Plus GX.
+- Keeps the hardware Window hidden on Stage Clear so sprite-HUD pattern data
+  cannot appear as stray vertical-line tiles.
+- Omits the eight gameplay HUD sprites on Story Stage Clear, allowing the
+  original Stage Clear labels to start at sprite entry 0.
+- Restores the `CLEAR BONUS` and `LEVEL BONUS` values with Stage Clear-only
+  digit sprites while preserving the original bonus calculations.
 - Leaves the original ROM unchanged.
 
 ## Controls
@@ -62,8 +75,8 @@ The normal build performs these steps automatically:
 Expected patched output:
 
 - Size: `2,097,152` bytes
-- Header checksum: `$CA48`
-- SHA-256: `C00BE1A3C4F89D96117400B9C24333211CACD34BC0E9BC0EE0BECA23229520BB`
+- Header checksum: `$407F`
+- SHA-256: `50CBF4092DE40FE6036E9A5B56A5969057E1C6EB89371B6D5BA7139946967E60`
 
 ## Project structure
 
@@ -104,9 +117,20 @@ matches the expected patched SHA-256 above.
 Recommended gameplay checks after changing the assembly source:
 
 - Start story mode and confirm the complete HUD and player health bar appear.
-- Pause and unpause, confirming that gameplay sprites remain unchanged.
-- Complete a stage and inspect the stage-clear HUD.
+- Pause and confirm that only the left `SCORE` label changes to a blinking
+  `PAUSE`; the timer, score values, health bars, high-score HUD, and gameplay
+  sprites must remain unchanged. Unpause and confirm that `SCORE` is restored
+  correctly and no longer blinks.
+- Complete stages 1-6 and confirm the normal gameplay HUD is absent from each
+  Stage Clear screen, with no vertical-line or stray tiles. Confirm the Stage
+  Clear labels and the numbers below both `CLEAR BONUS` and `LEVEL BONUS`
+  appear and match the awarded score. Confirm the complete HUD returns at the
+  start of the following stage. After Stage 3, confirm the following cutscene
+  displays its complete sprite list.
 - Start both `COM VS` and `VS` and confirm both robots and the sprite HUD appear.
+  Win rounds with each side and confirm one or two medallions appear at the
+  original side-specific positions without changing `SCORE`; confirm earned
+  medallions remain visible in the following round and reset for a new match.
 - Confirm A, B, and C perform heavy punch, light punch, and guard respectively.
 
 ## Technical documentation

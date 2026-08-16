@@ -11,7 +11,7 @@
 HudGameplayFrame:
         movem.l d0-d1/a0-a1,-(sp)
         move.w  #$9200,(VDP_CTRL).l       ; register 18: no Window rows
-        bsr.w   HudSeedSprites
+        bsr.w   HudSeedStorySprites       ; Stage Clear intentionally starts at entry 0
         movem.l (sp)+,d0-d1/a0-a1
 
         ; Reproduce the two instructions replaced at $FB156.
@@ -30,6 +30,7 @@ HudGameplayFrame2:
         movem.l d0-d1/a0-a1,-(sp)
         move.w  #$9200,(VDP_CTRL).l       ; no Window rows during VS battle
         bsr.w   HudSeedSprites
+        move.b  #HUD_FRAME_VS,(HUD_FRAME_SEEDED).w ; append round medals after objects
         movem.l (sp)+,d0-d1/a0-a1
 
         ; Reproduce the two instructions replaced at $1286A2.
@@ -153,15 +154,23 @@ HudSeedCounts:
         moveq   #8,d0
         move.l  d0,(SPRITE_COUNT).w
         move.w  d0,(dword_FFE44C).w        ; uploader reads the high word here
+        st      (HUD_FRAME_SEEDED).w        ; authorize one HUD-aware link pass
         rts
 
-; Gameplay-only sprite linker.  After the original routine has initialized
+; Gameplay-only fast sprite linker.  A one-use marker distinguishes an
+; ordinary HUD frame from Stage Clear, cutscenes, and menus that share the
+; global original linker call.  After the original routine has initialized
 ; the restored template once, links 0-6 are invariant and remain untouched.
 ; Entry 7 links to gameplay entry 8 only when one exists; entries 8 onward are
-; rebuilt normally.  Counts below the eight reserved HUD records use the
-; original general-purpose routine as a guarded fallback.
+; rebuilt normally.  During Stage Clear, append the two bonus values before
+; finalizing the chain because their original Window-row writes are suppressed.
+; Counts below the eight reserved HUD records use the original general-purpose
+; routine as a guarded fallback.
         org     HUD_LINK_SPRITES
 HudLinkSprites:
+        bsr.w   HudLinkFramePrepare      ; consumes the per-frame seed marker
+        tst.b   d0
+        beq.s   HudLinkSpritesNonGameplay
         cmpi.b  #$A5,(HUD_LINKS_VALID).w
         bne.s   HudLinkSpritesOriginal
         move.l  4(sp),d0
@@ -190,11 +199,16 @@ HudLinkSpritesLast:
 HudLinkSpritesOriginal:
         move.b  #$A5,(HUD_LINKS_VALID).w
         jmp     (SUB_LINK_SPRITES).l        ; preserve the caller's argument frame
+HudLinkSpritesNonGameplay:
+        clr.b   (HUD_LINKS_VALID).w         ; never carry fast-link state across modes
+        jmp     (SUB_LINK_SPRITES).l        ; rebuild complete Stage Clear/cutscene/menu chain
 
 ; Replaces the original D61FA epilogue.  By this point the game's dynamic VRAM
 ; cache has finished, so score/HP/timer source patterns are stable.
         org     HUD_VBLANK_TAIL
 HudVBlankTail:
+        tst.b   (byte_FFF484).w            ; freeze HUD pattern work while paused
+        bne.s   HudVBlankTailDone
         tst.b   (HUD_DIRTY).w
         beq.s   HudVBlankTailDone
         bsr.w   HudRefreshDirty
@@ -413,11 +427,13 @@ HudResetShadowLoop:
         rts
 
 ; The alternate gameplay mode has no replaceable no-op immediately before its
-; initial health calls.  Reset at the start of its setup block, then reproduce
-; the displaced clr/moveq pair.
+; initial health calls.  Reset at the start of its setup block, restore the
+; VS medal patterns after the three compatibility rows were cleared, then
+; reproduce the displaced clr/moveq pair.
         org     HUD_INIT_SHADOW_GAME2
 HudInitShadowGame2:
         bsr.w   HudResetShadow
+        bsr.w   HudLoadVsMedalArt
         clr.b   (byte_FFE048).w
         moveq   #0,d7
         jmp     ORIGIN_HUD_RESET_GAME2_CONT
@@ -604,14 +620,13 @@ HudPreparedStatic:
 HudPreparedTimeout equ HudPreparedStatic+$0780
 
 ; ---------------------------------------------------------------------------
-; Sprite-only pause display
+; Sprite-HUD pause display
 ;
 ; The original pause routine replaced HUD-atlas patterns and exposed a Window
-; strip.  This replacement blocks in the same way but leaves the complete
-; gameplay frame untouched.  PAUSE uses SAT entries 64-65, which are outside
-; the game's 64-record staging table but legal in H40 mode.  The two records
-; are prepared while unreachable, then atomically appended to the displayed
-; SAT chain.  Unpausing restores its former zero link before gameplay resumes.
+; strip.  This replacement blocks in the same way but leaves the Window hidden
+; and temporarily replaces the five left SCORE tiles with PAUSE.  It never
+; changes the SAT, so all HUD/gameplay sprite records and links remain frozen
+; and the display stays within the H32 hardware limit of entries 0-63.
 ; ---------------------------------------------------------------------------
         org     HUD_PAUSE_ROUTINE
 HudPauseRoutine:
@@ -626,15 +641,35 @@ HudPauseRoutine:
 
         st      (byte_FFF484).w
         jsr     (SUB_PAUSE_ENTER).l
-        bsr.w   HudPauseSpriteShow
+        bsr.w   HudPauseLabelShow
         move.w  #$9100,(VDP_CTRL).l
         move.w  #$9200,(VDP_CTRL).l       ; Window remains fully hidden
+        move.l  #HUD_PAUSE_VISIBLE_FRAMES,-(sp)
 HudPauseLoop:
         jsr     (SUB_PAUSE_WAIT).l
         btst    #7,(word_FFB802+1).w
-        beq.s   HudPauseLoop
+        bne.s   HudPauseExit
 
-        bsr.w   HudPauseSpriteHide
+        ; The low word of this stack-local counter is positive while PAUSE is
+        ; visible and negative while it is blank.  Keeping the state local to
+        ; this blocking routine guarantees that no blink can survive resume.
+        tst.w   2(sp)
+        bmi.s   HudPauseBlinkHidden
+        subq.w  #1,2(sp)
+        bne.s   HudPauseLoop
+        bsr.w   HudPauseLabelBlank
+        move.w  #-HUD_PAUSE_HIDDEN_FRAMES,2(sp)
+        bra.s   HudPauseLoop
+HudPauseBlinkHidden:
+        addq.w  #1,2(sp)
+        bne.s   HudPauseLoop
+        bsr.w   HudPauseLabelShow
+        move.w  #HUD_PAUSE_VISIBLE_FRAMES,2(sp)
+        bra.s   HudPauseLoop
+
+HudPauseExit:
+        addq.l  #4,sp                    ; discard pause-local blink counter
+        bsr.w   HudPauseLabelHide
         jsr     (SUB_PAUSE_RESTORE).l
         clr.b   (byte_FFF484).w
         move.w  #$9100,(VDP_CTRL).l
@@ -642,108 +677,291 @@ HudPauseLoop:
 HudPauseReturn:
         rts
 
-; Upload five transparent PAUSE tiles and the two unused SAT records before
-; linking them to the end of the currently displayed, frozen sprite chain.
-HudPauseSpriteShow:
-        movem.l d0-d7/a0,-(sp)
-
-        move.w  #PAUSE_PATTERN_VRAM,d1
-        jsr     (SUB_SET_VRAM_WRITE).l
+; SCORE occupies five unique top-row patterns across fixed HUD entries 0-1.
+; Replace only those patterns; the player score and health rows below them use
+; different tiles and remain visible.  The PAUSE asset already uses transparent
+; index 0 and foreground index $C, which is valid through the HUD palette line.
+HudPauseLabelShow:
+        movem.l d0-d7/a0-a2,-(sp)
         lea     (HudPreparedPause,pc),a0
-        moveq   #$27,d0                   ; 40 longs = five 8x8 tiles
-HudPausePatternLoop:
-        move.l  (a0)+,(VDP_DATA).l
-        dbf     d0,HudPausePatternLoop
-
-        move.w  #PAUSE_SPRITE_VRAM,d1
-        jsr     (SUB_SET_VRAM_WRITE).l
-        lea     (HudPauseSpriteTable,pc),a0
-        moveq   #3,d0                    ; two eight-byte SAT records
-HudPauseRecordLoop:
-        move.l  (a0)+,(VDP_DATA).l
-        dbf     d0,HudPauseRecordLoop
-
-        moveq   #0,d6                    ; begin at SAT entry 0
-        moveq   #$3F,d7                  ; game-owned entries are 0-63
-HudPauseFindEnd:
-        move.w  d6,d1
-        lsl.w   #3,d1
-        addi.w  #SPRITE_TABLE_VRAM+2,d1  ; size/link word
-        bsr.w   HudPauseReadVramWord
-        move.w  d0,d5
-        andi.w  #$007F,d0
-        beq.s   HudPauseAttach
-        cmpi.w  #$0040,d0                ; already attached guard
-        beq.s   HudPauseShowDone
-        cmpi.w  #$003F,d0                ; invalid/non-game chain guard
-        bhi.s   HudPauseShowDone
-        move.w  d0,d6
-        dbf     d7,HudPauseFindEnd
-        bra.s   HudPauseShowDone
-
-HudPauseAttach:
-        andi.w  #$FF80,d5                ; retain the predecessor's size bits
-        ori.w   #$0040,d5                ; former end -> PAUSE entry 64
-        jsr     (SUB_SET_VRAM_WRITE).l
-        move.w  d5,(VDP_DATA).l
-HudPauseShowDone:
-        movem.l (sp)+,d0-d7/a0
+        lea     (HudPauseScoreDestinations,pc),a1
+        moveq   #4,d7                    ; five contiguous PAUSE tiles
+        bsr.s   HudPauseCopyTiles
+        movem.l (sp)+,d0-d7/a0-a2
         rts
 
-; Find the link to entry 64 and restore it to zero.  The PAUSE records and
-; patterns can remain in their reserved VRAM gap because they are unreachable.
-HudPauseSpriteHide:
-        movem.l d0-d7,-(sp)
-        moveq   #0,d6
-        moveq   #$3F,d7
-HudPauseFindOverlay:
-        move.w  d6,d1
-        lsl.w   #3,d1
-        addi.w  #SPRITE_TABLE_VRAM+2,d1
-        bsr.w   HudPauseReadVramWord
-        move.w  d0,d5
-        andi.w  #$007F,d0
-        beq.s   HudPauseHideDone
-        cmpi.w  #$0040,d0
-        beq.s   HudPauseDetach
-        cmpi.w  #$003F,d0
-        bhi.s   HudPauseHideDone
-        move.w  d0,d6
-        dbf     d7,HudPauseFindOverlay
-        bra.s   HudPauseHideDone
-
-HudPauseDetach:
-        andi.w  #$FF80,d5                ; restore the former end-of-list link
+; Blank only the five PAUSE/SCORE pattern cells.  A small zero-fill loop avoids
+; another graphics asset and leaves every other HUD/gameplay pattern untouched.
+HudPauseLabelBlank:
+        movem.l d0-d7/a0-a2,-(sp)
+        lea     (HudPauseScoreDestinations,pc),a1
+        lea     (VDP_DATA).l,a2
+        moveq   #4,d7                    ; five tiles
+HudPauseBlankTile:
+        move.w  (a1)+,d1
         jsr     (SUB_SET_VRAM_WRITE).l
-        move.w  d5,(VDP_DATA).l
-HudPauseHideDone:
-        movem.l (sp)+,d0-d7
+        moveq   #0,d2                    ; do not rely on the helper preserving d2
+        moveq   #7,d0                    ; eight transparent longs per tile
+HudPauseBlankLong:
+        move.l  d2,(a2)
+        dbf     d0,HudPauseBlankLong
+        dbf     d7,HudPauseBlankTile
+        movem.l (sp)+,d0-d7/a0-a2
         rts
 
-; d1.w = VRAM byte address, returns d0.w.  This is the same VDP read-command
-; construction used by the HUD map reader.
-HudPauseReadVramWord:
-        moveq   #0,d0
-        move.w  d1,d0
-        move.w  d1,d2
-        andi.w  #$3FFF,d0
-        swap    d0
-        rol.w   #2,d2
-        andi.w  #3,d2
-        move.w  d2,d0
-        move.l  d0,(VDP_CTRL).l
-        move.w  (VDP_DATA).l,d0
+; Static tile IDs $1B4-$1B7 are S,C,O,R, while $1B8 is T and $1BB is E.
+; Restore the four contiguous letters first, then the non-contiguous E.  This
+; repairs only the five overwritten cells without requesting a full atlas
+; rebuild or disturbing pending HUD updates.
+HudPauseLabelHide:
+        movem.l d0-d7/a0-a2,-(sp)
+        lea     (HudPreparedStatic+$0680,pc),a0
+        lea     (HudPauseScoreDestinations,pc),a1
+        moveq   #3,d7                    ; S,C,O,R
+        bsr.s   HudPauseCopyTiles
+        lea     (HudPreparedStatic+$0760,pc),a0
+        moveq   #0,d7                    ; E; a1 now selects the fifth cell
+        bsr.s   HudPauseCopyTiles
+        movem.l (sp)+,d0-d7/a0-a2
         rts
 
-HudPauseSpriteTable:
-        dc.w    $00A0,$0C41,$A094,$00F0  ; PAUS, 4x1 at (112,32), -> 65
-        dc.w    $00A0,$0000,$A098,$0110  ; E,    1x1 at (144,32), end
+; a0 = contiguous source tiles, a1 = destination-address list, d7 = count - 1.
+; The destination patterns are separated by the 4x3 sprites' column-major
+; layout, so issue one VRAM command per tile.
+HudPauseCopyTiles:
+        lea     (VDP_DATA).l,a2
+HudPauseCopyTile:
+        move.w  (a1)+,d1
+        jsr     (SUB_SET_VRAM_WRITE).l
+        moveq   #7,d0                    ; eight longs = one 8x8 tile
+HudPauseCopyLong:
+        move.l  (a0)+,(a2)
+        dbf     d0,HudPauseCopyLong
+        dbf     d7,HudPauseCopyTile
+        rts
+
+HudPauseScoreDestinations:
+        dc.w    $18C0,$1920,$1980,$19E0,$1A40
 
 ; Build-generated duplicate of the original five PAUSE tiles.  Palette index
 ; 1 is made transparent only in this private copy; the source ROM art is kept.
+; During pause these tiles temporarily replace the five left SCORE patterns.
         org     HUD_PREPARED_PAUSE
 HudPreparedPause:
         incbin  "../ASSETS/hud_pause_prepared.bin"
+
+; ---------------------------------------------------------------------------
+; Stage Clear bonus values
+;
+; The labels are dynamic sprites, but the original eight-digit values use
+; sub_133AD4 to write Window rows 16 and 22.  Those addresses overlap the
+; protected sprite-HUD atlas and the Window remains hidden, so reproduce the
+; same calculations as one-tile digit sprites.  The game's contiguous digit
+; font at tile $1A8 is already loaded for the original Window display.
+;
+; Story Stage Clear deliberately skips the eight fixed HUD records so its
+; original dynamic labels begin at SAT entry 0.  VS never calls this story-only
+; selector.  The distinct marker lets HudLinkFramePrepare append the bonus
+; values, then select the original full linker for the resulting zero-based
+; list.  d7.l enters with the current SAT count and returns with the appended
+; count.
+; ---------------------------------------------------------------------------
+        org     HUD_STAGE_CLEAR_NUMBERS
+HudSeedStorySprites:
+        move.l  (dword_FFBA1C).w,d0
+        beq.w   HudSeedSprites            ; ordinary story gameplay keeps the HUD
+        cmpi.l  #$BA,d0
+        bcc.w   HudSeedSprites            ; Stage Clear ended; restore normal seeding
+
+        moveq   #0,d0
+        move.l  d0,(SPRITE_COUNT).w       ; Stage Clear labels start at entry 0
+        move.w  d0,(dword_FFE44C).w       ; uploader count starts at zero as well
+        move.b  #HUD_FRAME_STAGE_CLEAR,(HUD_FRAME_SEEDED).w
+        rts
+
+HudLinkFramePrepare:
+        moveq   #0,d0
+        move.b  (HUD_FRAME_SEEDED).w,d0
+        beq.s   HudLinkFrameReady         ; cutscene/menu: original full linker
+        clr.b   (HUD_FRAME_SEEDED).w       ; marker is valid for one link pass
+        cmpi.b  #HUD_FRAME_STAGE_CLEAR,d0
+        beq.s   HudLinkFrameStageClear
+        cmpi.b  #HUD_FRAME_VS,d0
+        beq.s   HudLinkFrameVs
+
+        moveq   #1,d0                     ; ordinary story HUD fast linker
+        rts
+
+HudLinkFrameVs:
+        ; The helper return and the linker's caller return precede the count.
+        ; Saving d7 moves that count argument to 12(sp).  Medals are appended
+        ; after every robot/effect record, so their variable count cannot shift
+        ; or hide gameplay sprites.
+        move.l  d7,-(sp)
+        move.l  12(sp),d7
+        bsr.w   HudVsMedalAppend
+        move.l  d7,12(sp)
+        move.l  d7,(SPRITE_COUNT).w
+        move.w  d7,(dword_FFE44C).w       ; SAT uploader count
+        move.l  (sp)+,d7
+        moveq   #1,d0                     ; retain the gameplay HUD fast linker
+        rts
+
+HudLinkFrameStageClear:
+        move.l  (dword_FFBA1C).w,d0
+        cmpi.l  #$41,d0                  ; CLEAR BONUS has been calculated
+        bcs.s   HudLinkFrameStageReady
+        cmpi.l  #$BA,d0                  ; transition begins after state $B9
+        bcc.s   HudLinkFrameStageReady
+
+        ; The helper return and the linker's caller return precede the count.
+        ; Saving d7 moves that count argument to 12(sp).
+        move.l  d7,-(sp)
+        move.l  12(sp),d7
+        bsr.w   HudStageClearAppend
+        move.l  d7,12(sp)
+        move.l  d7,(SPRITE_COUNT).w
+        move.w  d7,(dword_FFE44C).w      ; SAT uploader count
+        move.l  (sp)+,d7
+HudLinkFrameStageReady:
+        moveq   #0,d0                    ; original linker handles entry 0 onward
+HudLinkFrameReady:
+        rts
+
+HudStageClearAppend:
+        movem.l d0-d6/a0-a1,-(sp)
+        cmpi.w  #$0040,d7                ; H32 SAT has 64 entries
+        bcc.s   HudStageClearAppendDone
+
+        move.w  d7,d0
+        lsl.w   #3,d0                    ; eight bytes per SAT record
+        lea     (SPRITE_TABLE_RAM).w,a0
+        adda.w  d0,a0
+        move.l  (dword_FFBA1C).w,d6
+
+        ; CLEAR BONUS = remaining-time units * 1000, at Window row 16.
+        move.l  (dword_FFB9E4).w,d0
+        move.w  #1000,d1
+        mulu.w  d1,d0
+        move.w  #$0100,d4                ; screen Y 128 + SAT bias $80
+        move.w  #$0108,d5                ; rightmost column 17 + bias
+        bsr.s   HudStageClearRenderValue
+
+        ; LEVEL BONUS appears only on the original non-negative stage path.
+        cmpi.l  #$42,d6
+        bcs.s   HudStageClearAppendDone
+        move.l  (dword_FFB8AC).w,d0
+        bmi.s   HudStageClearAppendDone
+        addq.l  #1,d0
+        move.w  #5000,d1
+        mulu.w  d1,d0
+        move.w  #$0130,d4                ; screen Y 176 + SAT bias $80
+        move.w  #$0108,d5
+        bsr.s   HudStageClearRenderValue
+
+HudStageClearAppendDone:
+        movem.l (sp)+,d0-d6/a0-a1
+        rts
+
+; Render a positive or zero 32-bit value right-aligned in the original
+; eight-cell field.  Leading zero cells need no sprites because the background
+; is already transparent.  Inputs: d0.l value, d4.w Y, d5.w rightmost X,
+; a0 next SAT record, d7.w count.  Returns updated a0/d7.
+HudStageClearRenderValue:
+        moveq   #10,d1
+        moveq   #7,d3                    ; original field is eight cells wide
+HudStageClearDigitLoop:
+        cmpi.w  #$0040,d7
+        bcc.s   HudStageClearRenderDone
+        divu.w  d1,d0                    ; quotient low, remainder high
+        move.l  d0,d2
+        swap    d2
+        andi.w  #$000F,d2
+        addi.w  #$81A8,d2               ; priority + digit tile 0
+        move.w  d4,(a0)+
+        clr.w   (a0)+                    ; 1x1 size; linker fills link byte
+        move.w  d2,(a0)+
+        move.w  d5,(a0)+
+        addq.w  #1,d7
+        subi.w  #8,d5
+        andi.l  #$0000FFFF,d0            ; retain quotient for next digit
+        beq.s   HudStageClearRenderDone
+        dbf     d3,HudStageClearDigitLoop
+HudStageClearRenderDone:
+        rts
+
+; Append the original VS round-win medals after the dynamic sprite list.
+; dword_FFD64C is 1P's win count and dword_FFD650 is 2P's.  The match ends
+; when either reaches two, but clamp both counters defensively.  d7.w enters
+; and returns as the SAT record count; a full table drops medals before any
+; gameplay sprite can be displaced.
+HudVsMedalAppend:
+        movem.l d0-d3/a0,-(sp)
+        cmpi.w  #$0040,d7                ; H32 SAT has 64 entries
+        bcc.s   HudVsMedalAppendDone
+
+        move.w  d7,d0
+        lsl.w   #3,d0                    ; eight bytes per SAT record
+        lea     (SPRITE_TABLE_RAM).w,a0
+        adda.w  d0,a0
+        moveq   #2,d2                    ; best-of-three: two wins end the match
+
+        move.l  (dword_FFD64C).w,d0      ; 1P medals begin at screen (88,8)
+        cmp.l   d2,d0
+        bls.s   HudVsMedal1PCountReady
+        move.l  d2,d0
+HudVsMedal1PCountReady:
+        move.w  #$00D8,d1                ; X 88 + hardware bias $80
+        bsr.s   HudVsMedalRenderSide
+
+        move.l  (dword_FFD650).w,d0      ; 2P medals begin at screen (160,8)
+        cmp.l   d2,d0
+        bls.s   HudVsMedal2PCountReady
+        move.l  d2,d0
+HudVsMedal2PCountReady:
+        move.w  #$0120,d1                ; X 160 + hardware bias $80
+        bsr.s   HudVsMedalRenderSide
+
+HudVsMedalAppendDone:
+        movem.l (sp)+,d0-d3/a0
+        rts
+
+; d0.l = medal count, d1.w = first biased X, a0 = next SAT record.
+; One 1x2 sprite reuses the same two tile patterns for every medal.  Successive
+; wins move eight pixels right, exactly matching the original Window address
+; increment.  d7.w/a0 return advanced.
+HudVsMedalRenderSide:
+        tst.l   d0
+        ble.s   HudVsMedalRenderDone
+        subq.w  #1,d0                    ; DBF count
+HudVsMedalRenderLoop:
+        cmpi.w  #$0040,d7
+        bcc.s   HudVsMedalRenderDone
+        move.w  #$0088,(a0)+             ; screen Y 8 + hardware bias $80
+        move.w  #$0100,(a0)+             ; 1x2 size; linker supplies link byte
+        move.w  #$8000+HUD_VS_MEDAL_TILE,(a0)+ ; priority, palette 0, tiles C0/C1
+        move.w  d1,(a0)+
+        addq.w  #8,d1
+        addq.w  #1,d7
+        dbf     d0,HudVsMedalRenderLoop
+HudVsMedalRenderDone:
+        rts
+
+; The compatibility Window rows include VRAM $1800-$18BF and are cleared on
+; every VS round transition.  Reload the original uncompressed two-tile medal
+; once after that clear.  The original winner paths are also redirected here,
+; so neither path can overwrite the SCORE atlas at $1980/$19A0.
+HudLoadVsMedalArt:
+        movem.l d0/a0-a1,-(sp)
+        move.l  #HUD_VS_MEDAL_VDP_COMMAND,(VDP_CTRL).l
+        lea     (ORIGIN_VS_MEDAL_ART).l,a0
+        lea     (VDP_DATA).l,a1
+        moveq   #$0F,d0                  ; 16 longs = two 8x8 tiles
+HudLoadVsMedalLoop:
+        move.l  (a0)+,(a1)
+        dbf     d0,HudLoadVsMedalLoop
+        movem.l (sp)+,d0/a0-a1
+        rts
 
 ; Three-button guard compatibility helper.  Reproduce the displaced dash-state
 ; copy, then preserve the original patch's guard+B behavior.  The standalone
