@@ -64,6 +64,13 @@ if not exist "..\srecfile.txt" (
     exit /b 1
 )
 
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "..\_validate_srec.ps1" -Path "..\srecfile.txt"
+if errorlevel 1 (
+    echo ERROR: S-record validation failed.
+    popd
+    exit /b 1
+)
+
 popd
 endlocal
 exit /b 0

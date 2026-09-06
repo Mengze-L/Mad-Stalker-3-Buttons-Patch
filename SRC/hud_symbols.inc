@@ -27,6 +27,7 @@ ORIGIN_VS_WINDOW_IMM          equ $00127BFC
 ORIGIN_VS_MEDAL_UPLOAD1_IMM   equ $000F7DA0
 ORIGIN_VS_MEDAL_UPLOAD2_IMM   equ $000F7E66
 ORIGIN_VS_MEDAL_ART           equ $000F7CDA
+ORIGIN_STAGE5_PANEL_HOOK      equ $001246C4
 
 ORIGIN_WINDOW_WRITE           equ $00133A58
 ORIGIN_WINDOW_BLANK           equ $00133A86
@@ -43,6 +44,7 @@ SUB_LINK_SPRITES              equ $0011CEC8
 SUB_PAUSE_ENTER               equ $001011F8
 SUB_PAUSE_RESTORE             equ $0010129A
 SUB_PAUSE_WAIT                equ $000FD16A
+SUB_STAGE5_TRANSITION_SIGNAL  equ $00100B62
 
 ; The original ROM is zero-filled from $1FBD4A to EOF.
 HUD_CODE_BASE                 equ $001FBD4A
@@ -53,7 +55,7 @@ HUD_WINDOW_BLANK              equ $001FBE20
 HUD_TIMEOUT_GFX               equ $001FBE70
 HUD_VBLANK_TAIL               equ $001FBF40
 HUD_REFRESH_DIRTY             equ $001FBF60
-HUD_COPY_PATTERN              equ $001FBFC0
+HUD_COPY_PATTERN              equ $001FBFD0
 HUD_REFRESH_TIMER             equ $001FC0C0
 HUD_REFRESH_ALL               equ $001FC120
 HUD_RESET_SHADOW              equ $001FC180
@@ -71,7 +73,18 @@ HUD_LINK_SPRITES              equ $001FD240
 HUD_PAUSE_ROUTINE             equ $001FD2A0
 HUD_PREPARED_PAUSE            equ $001FD500
 HUD_STAGE_CLEAR_NUMBERS       equ $001FD5A0
+HUD_INIT_SHADOW_GAME1         equ $001FD740
+HUD_STAGE5_PANEL_SETUP        equ $001FD7C0
 HUD_DASH_GUARD                equ $001FD9A0
+
+; Story Stage 3 Plane B is vertically scrolled by 32 pixels in scene 0, so
+; screen rows 0-23 use its tile rows $484-$486 at VRAM $9080-$90DF.  The first
+; five scanlines of tile $487 continue through VRAM $90F3.
+HUD_STAGE3_SKY_VDP_COMMAND    equ $50800002
+HUD_STAGE5_PANEL_680_COMMAND  equ $50000003
+HUD_STAGE5_PANEL_6A8_COMMAND  equ $55000003
+HUD_DIRTY_REGULAR_MASK        equ $0F
+HUD_DIRTY_STAGE5_PANEL        equ $10
 
 HUD_PAUSE_VISIBLE_FRAMES      equ 30
 HUD_PAUSE_HIDDEN_FRAMES       equ 15

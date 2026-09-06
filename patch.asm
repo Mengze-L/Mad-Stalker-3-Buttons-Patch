@@ -100,13 +100,21 @@
         org     ORIGIN_DASH_GUARD_HOOK
         jmp     HUD_DASH_GUARD
 
-; Reset the authoritative RAM shadow before either gameplay mode draws its
-; initial health bars.  The first hook replaces a true no-op call; the second
-; uses a small wrapper for its displaced initialization instructions.
+; Reset the authoritative RAM shadow and invalidate the fixed SAT signature
+; before either gameplay mode draws its initial health bars.  This also forces
+; one complete HUD-record restore after a warm reset.  The second hook uses a
+; small wrapper for its displaced setup.
         org     ORIGIN_HUD_RESET_GAME1
-        jsr     HUD_RESET_SHADOW
+        jsr     HUD_INIT_SHADOW_GAME1
 
         org     ORIGIN_HUD_RESET_GAME2
         jmp     HUD_INIT_SHADOW_GAME2
+
+; Stage 5's boss-room display panels use palette-0 index $D, whose pale color
+; is too close to the sprite health bar.  At the one-time room transition,
+; schedule a VBlank upload of private copies that use existing darker index $B
+; only for those panel pixels.  CRAM and shared background art remain unchanged.
+        org     ORIGIN_STAGE5_PANEL_HOOK
+        jsr     HUD_STAGE5_PANEL_SETUP
 
         include "SRC/hud_code.inc"

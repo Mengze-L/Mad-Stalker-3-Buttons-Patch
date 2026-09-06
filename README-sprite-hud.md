@@ -21,11 +21,52 @@ Changed atlas indices are queued and VBlank consumes at most eight directly,
 so a one-cell update no longer scans all 60 dirty-bit positions.
 Queued cells use their RAM shadow words directly instead of rereading the
 Window map from VRAM.  Full atlas rebuilds now use the same RAM shadow, so no
-HUD path depends on Window VRAM.  The eight constant HUD sprite records are copied
-only when a staging-table signature shows that a screen transition changed
-them.  Clean VBlanks bypass the refresh routine completely.
+HUD path depends on Window VRAM.  The eight constant HUD sprite records are
+copied only when a staging-table signature shows that a screen transition
+changed them.  Each gameplay setup explicitly invalidates entry 0's checked Y
+word, forcing exactly one complete template copy.  This is required because
+the original warm-reset path preserves RAM but changes every staging record's
+size/link word to `$0501`; the setup-time invalidation prevents those 2x2 sizes
+from passing the sparse signature after a soft reset without adding any
+per-frame work.  Clean VBlanks bypass the refresh routine completely.
 Prepared timeout graphics also eliminate the original pair of 128-byte
 source-VRAM DMAs; only the four tiles belonging to a changed digit are copied.
+The replacement preserves the original routine's final `$00007780` return in
+`D0`.  Returning the cached tens digit instead can set a dormant control bit
+and trap Stage 3 Continue in the original blocking input-poll loop.
+Health cells retain the original Window graphics' palette-0 progression:
+`$7`, dithered `$7/$6`, `$6`, `$5`, `$4`, `$3`, and `$2`, with transparent
+index `$0` replacing only the original opaque-black index `$1`.  No health-HUD
+code changes CRAM, so all `$7-$2` pixels retain the game's original global
+palette colors.
+Story Stage 3 receives one stage-private background adjustment after its
+normal Plane B DMA completes. Scene 0's 32-pixel vertical Plane B scroll maps
+screen rows 0-23 to patterns `$484-$486`. Screen lines 0-6 repeat the source
+two-line dither unit: solid orange index `$5` (`#EF8A21`), then alternating
+orange/dark-orange pixels `$45454545`; Stage 3 CRAM index `$4` is `$024C`
+(`#CE4521`). Dither lines 1 and 5 retain the original `$45454545` phase; line 3
+is phase-shifted horizontally by one pixel to `$54545454`. Lines 7-23 remain
+solid orange. The
+first two scanlines of `$487`
+are also orange, and that tile's original first three lower-transition lines
+remain shifted down two. Its final three scanlines—and the later gradient—stay
+original.
+Only 116 bytes are written once when Story Stage 3 setup has normalized its
+scene state to `$00`. Later Stage 3 resumes are normalized to `$0B` and skip
+the upload. The Plane B map, CRAM, Window state, later sky rows, all other
+stages, and the per-frame gameplay path are unchanged.
+Story Stage 5 receives a separate one-time boss-room adjustment. The large
+Plane A display panels are made from patterns `$680-$684` and `$6A8-$6AA`.
+Private uncompressed copies preserve the original border/detail pixels while
+remapping only pale palette-0 index `$D` (`#CECE8C`, CRAM `$08CC`) to the
+existing darker gray-green index `$B` (`#8C8A63`, CRAM `$0688`). The original
+compressed background resource and CRAM are untouched. A hook in the final
+room transition sets dirty bit 4 after the room art is present. The VBlank HUD
+tail gives the 256-byte panel transfer its own pass and retains simultaneous
+ordinary HUD bits for the following VBlank. Clean VBlanks do not enter this
+dispatcher, so earlier Stage 5 scenes and the normal per-frame path remain
+unchanged. Each panel group explicitly reloads its own prepared table address;
+the `$6A8-$6AA` copy no longer depends on following `$680-$684` in ROM.
 During gameplay, sprite links 0-6 are initialized once and then preserved.
 Only HUD link 7 and the gameplay-sprite portion of the chain are rebuilt each
 VBlank.  Ordinary story gameplay sets a one-use `$FF` marker, VS uses `$56`,
@@ -73,7 +114,10 @@ Per-frame gameplay gating, Stage Clear state detection, and count preparation
 live with the digit renderer, not inside the fixed sprite-link block.  This
 keeps the linker below the PAUSE routine at `$1FD2A0`, while the one-use marker
 prevents Stage 3 and later cutscenes from inheriting the gameplay-only fast
-linker.
+linker.  The Story selector also reproduces the original requirement that the
+`$FFFFBA18` death/Game Over state machine be idle before treating a nonzero
+`$FFFFBA1C` event as Stage Clear.  Ordinary gameplay still exits on the first
+`$BA1C == 0` test, so this guard adds no steady-state gameplay cost.
 The merged three-button control patch maps A to heavy punch, B to light punch,
 and C to guard.  Its guard/dash helper uses aligned per-player longword access,
 so the layout works for both players with 68000 address-error emulation enabled.
@@ -92,9 +136,12 @@ build.bat
 ```
 
 The normal build uses `TOOLS\vasmm68k_mot_win32.exe` to assemble `patch.asm`
-as a sparse S-record overlay, applies it to a copy of the verified ROM, and
-runs `fixheader.exe` to regenerate the Mega Drive header checksum.  The output
-is `OUTPUT\MADS (Mengze).bin`.  The original ROM is never modified.
+as a sparse S-record overlay, validates every S-record checksum and rejects any
+overlapping data ranges, applies it to a copy of the verified ROM, and runs
+`fixheader.exe` to regenerate the Mega Drive header checksum. The overlap
+validator has no 2 MiB output limit, so future patch records may extend beyond
+the original image. The output is `OUTPUT\MADS (Mengze).bin`. The original ROM
+is never modified.
 
 `patch.asm` remains the single complete, ORG-based assembly entry point, while
 the implementation stays organized in `SRC\*.inc`.  The prepared transparent
@@ -115,12 +162,17 @@ guards; it is not part of the normal build workflow.
 - VRAM `$17C0-$17FF`: two-tile `HI` label sprite slot
 - VRAM `$18C0`, `$1920`, `$1980`, `$19E0`, `$1A40`: five left `SCORE`
   pattern cells temporarily replaced by `PAUSE`
+- VRAM `$D000-$D09F` and `$D500-$D55F`: Stage 5 boss-room Plane A patterns
+  `$680-$684` and `$6A8-$6AA`, replaced once by the private index-`$B` copies
 - ROM `$1FBD4A-$1FD9E3`: code, lookup tables, prepared art, and fast paths
 - ROM `$1FC560-$1FD1DF`: prepared uncompressed transparent HUD tiles
 - ROM `$1FD500-$1FD59F`: prepared uncompressed transparent PAUSE tiles
-- ROM `$1FD5A0-$1FD737`: frame selectors, Stage Clear renderer, and VS medallion support
+- ROM `$1FD5A0-$1FD73F`: frame selectors, Stage Clear renderer, and VS medallion support
+- ROM `$1FD740-$1FD7B5`: Story Stage 3 Scene 0-only Plane B color adjustment
+- ROM `$1FD7C0-$1FD915`: Story Stage 5 boss-room scheduler, VBlank upload, and prepared panel tiles
 - ROM `$1FD9A0-$1FD9E3`: aligned three-button guard/dash helper
-- RAM `$FFFFF663`: one-byte HUD dirty flags
+- RAM `$FFFFF663`: one-byte HUD dirty flags (bits 0-3 = ordinary HUD work;
+  bit 4 = one-time Stage 5 panel upload)
 - RAM `$FFFFF680-$FFFFF681`: cached timeout right/left digit values
 - RAM `$FFFFF682`: timeout-cache validity marker
 - RAM `$FFFFF683`: fixed HUD-link validity marker
@@ -131,8 +183,10 @@ guards; it is not part of the normal build workflow.
 - RAM `$FFFFF70E`: changed-cell queue count
 - RAM `$FFFFF70F-$FFFFF74A`: changed-cell queue (up to 60 unique indices)
 
-Each gameplay setup resets the RAM shadow before drawing its initial health
-bars and the rest of the HUD.  Shared Window clears retain a three-row compatibility clear because
+Each gameplay setup resets the RAM shadow and invalidates the fixed SAT
+signature before drawing its initial health bars and the rest of the HUD.  The
+first gameplay frame consequently restores all eight fixed records, including
+their correct size words.  Shared Window clears retain a three-row compatibility clear because
 non-game screens still use the hardware Window; no such clear can reach the
 sprite atlas at `$18C0`.  Stage Clear leaves the Window hidden instead of
 exposing the protected lower rows.

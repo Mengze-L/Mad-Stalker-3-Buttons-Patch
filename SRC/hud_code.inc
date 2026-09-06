@@ -120,7 +120,8 @@ HudTimeoutForceBoth:
 HudTimeoutStore:
         move.b  d2,(HUD_TIMER_LEFT).w
         move.b  d0,(HUD_TIMER_RIGHT).w
-        move.l  d2,d0                    ; match the original quotient result
+        moveq   #0,d0
+        move.w  #$7780,d0                ; preserve original sub_133DF8 return value
         move.l  (sp)+,d3
         rts
 
@@ -216,9 +217,12 @@ HudVBlankTailDone:
         movem.l (sp)+,d3/a3-a6
         rts
 
-; Dirty bit 0 requests all 60 cells, bit 1 the eight timer cells, and bit 2
-; only map cells recorded in HUD_CELL_DIRTY.  Ordinary HUD writes use bit 2 so
-; a score/HP change cannot trigger a costly full-atlas rebuild every frame.
+; Dirty bit 0 requests all 60 cells, bit 1 the left timer digit, bit 2 only
+; map cells recorded in HUD_CELL_DIRTY, and bit 3 the right timer digit.
+; Bit 4 schedules the one-time Stage 5 panel upload.  Service that larger
+; transfer by itself and retain any ordinary HUD bits for the next VBlank.
+; Ordinary HUD writes use bit 2 so a score/HP change cannot trigger a costly
+; full-atlas rebuild every frame.
         org     HUD_REFRESH_DIRTY
 HudRefreshDirty:
         move.l  d0,-(sp)
@@ -226,6 +230,13 @@ HudRefreshDirty:
         move.b  (HUD_DIRTY).w,d0
         beq.s   HudRefreshDirtyDone
         clr.b   (HUD_DIRTY).w
+        btst    #4,d0
+        beq.s   HudRefreshDirtyRegular
+        andi.b  #HUD_DIRTY_REGULAR_MASK,d0
+        or.b    d0,(HUD_DIRTY).w           ; defer simultaneous ordinary HUD work
+        bsr.w   HudStage5PanelUpload
+        bra.s   HudRefreshDirtyDone
+HudRefreshDirtyRegular:
         btst    #0,d0
         beq.s   HudRefreshDirtyPartial
         bsr.w   HudRefreshAll
@@ -420,10 +431,15 @@ HudResetShadowLoop:
         clr.b   (HUD_CELL_DIRTY+8).w
         clr.b   (HUD_QUEUE_COUNT).w
         clr.b   (HUD_TIMER_VALID).w
-        clr.b   (HUD_LINKS_VALID).w       ; force one complete link rebuild after transitions
+        ; A warm reset preserves the staging table, then the original reset
+        ; code replaces only every sprite's size/link word with $0501.  Clear
+        ; entry 0's checked Y word so HudSeedSprites cannot accept that damaged
+        ; table as the fixed HUD template.  HudSeedCopy restores all eight
+        ; records and clears HUD_LINKS_VALID on the first gameplay frame.
+        clr.w   (SPRITE_TABLE_RAM).w
         move.b  #1,(HUD_DIRTY).w           ; rebuild blank/current RAM state once
         movem.l (sp)+,d0-d1/a0
-        tst.w   d0                        ; match the original helper's flags
+        tst.w   d0
         rts
 
 ; The alternate gameplay mode has no replaceable no-op immediately before its
@@ -770,6 +786,11 @@ HudPreparedPause:
 HudSeedStorySprites:
         move.l  (dword_FFBA1C).w,d0
         beq.w   HudSeedSprites            ; ordinary story gameplay keeps the HUD
+        ; The original frame loop enters Stage Clear only when BA1C is active
+        ; and the BA18 death/Game Over state machine is idle.  Check BA18 only
+        ; on this nonzero event path, preserving the ordinary gameplay timing.
+        tst.l   (dword_FFBA18).w
+        bne.w   HudSeedSprites            ; death/Game Over is not Stage Clear
         cmpi.l  #$BA,d0
         bcc.w   HudSeedSprites            ; Stage Clear ended; restore normal seeding
 
@@ -962,6 +983,116 @@ HudLoadVsMedalLoop:
         dbf     d0,HudLoadVsMedalLoop
         movem.l (sp)+,d0/a0-a1
         rts
+
+; Story Stage 3 scene 0 scrolls Plane B vertically by 32 pixels.  Its visible
+; screen rows 0-23 therefore map to tile rows $484-$486, not the map's first
+; three rows.  Extend the original upper orange/index-$5 and dark-orange/
+; index-$4 dither unit through screen lines 0-6 (7 scanlines), with dither
+; line 3 shifted horizontally by one pixel.  Keep lines 1 and 5 in the
+; original phase and lines 7-23 solid
+; orange.  Extend that orange band two more scanlines into tile
+; $487 and move $487's original first three lower-transition scanlines down by
+; the same two lines.  The remaining lower gradient scanlines stay exactly
+; where the original stage placed them.  Stage 3 CRAM index $4 is $024C.
+;
+; This runs once after the normal Stage 3 background DMA has completed.  It
+; does not change CRAM, the Plane B map, any other stage, or the per-frame
+; gameplay path.  HudResetShadow remains last so its original return flags are
+; preserved for the setup caller.
+        org     HUD_INIT_SHADOW_GAME1
+HudInitShadowGame1:
+        bsr.s   HudStage3SolidHudBand
+        jmp     (HudResetShadow).l
+
+HudStage3SolidHudBand:
+        cmpi.l  #3,(dword_FFB814).w
+        bne.s   HudStage3SolidHudBandDone
+        tst.l   (dword_FFB9C4).w          ; setup normalizes scene 0 to state $00
+        bne.s   HudStage3SolidHudBandDone ; later Stage 3 resumes use state $0B
+        movem.l d0-d2/a0,-(sp)
+        move.w  #$8F02,(VDP_CTRL).l       ; VDP auto-increment = two bytes
+        move.l  #HUD_STAGE3_SKY_VDP_COMMAND,(VDP_CTRL).l
+        lea     (VDP_DATA).l,a0
+        move.l  #$55555555,d0             ; eight pixels of palette index 5
+        move.l  #$45454545,d1             ; original index 4/5 dither phase
+        move.l  d0,(a0)                   ; line 0: solid orange
+        move.l  d1,(a0)                   ; line 1: original dither phase
+        move.l  d0,(a0)                   ; line 2: solid orange
+        ror.l   #4,d1                      ; shift line 3 one pixel
+        move.l  d1,(a0)                   ; line 3: one-pixel phase shift
+        move.l  d0,(a0)                   ; line 4: solid orange
+        ror.l   #4,d1                      ; restore original phase for line 5
+        move.l  d1,(a0)                   ; line 5: original dither phase
+        move.l  d0,(a0)                   ; line 6 completes 7-line band
+        moveq   #$10,d2                   ; lines 7-23: solid orange
+HudStage3SolidHudBandLoop:
+        move.l  d0,(a0)
+        dbf     d2,HudStage3SolidHudBandLoop
+
+        ; Tile $487 lines 0-4: two-line orange extension followed by its
+        ; original first three transition lines, shifted down two scanlines.
+        move.l  d0,(a0)
+        move.l  d0,(a0)
+        move.l  #$56565656,(a0)
+        move.l  #$66666666,(a0)
+        move.l  #$65656565,(a0)
+        movem.l (sp)+,d0-d2/a0
+HudStage3SolidHudBandDone:
+        rts
+
+; The Stage 5 boss-room transition reaches this original call only once, after
+; the room's Plane A patterns have been installed.  Preserve the displaced
+; transition signal and schedule the panel transfer for VBlank.  Prepared
+; copies remap only palette-0 index $D to existing index $B; borders and every
+; other pixel are byte-for-byte identical.
+        org     HUD_STAGE5_PANEL_SETUP
+HudStage5PanelSetup:
+        jsr     (SUB_STAGE5_TRANSITION_SIGNAL).l
+        ori.b   #HUD_DIRTY_STAGE5_PANEL,(HUD_DIRTY).w
+        rts
+
+HudStage5PanelUpload:
+        movem.l d0/a0-a1,-(sp)
+        move.w  #$8F02,(VDP_CTRL).l       ; VDP auto-increment = two bytes
+        lea     (HudStage5PanelTiles680).l,a0
+        lea     (VDP_DATA).l,a1
+        move.l  #HUD_STAGE5_PANEL_680_COMMAND,(VDP_CTRL).l
+        moveq   #$27,d0                  ; 40 longs = tiles $680-$684
+HudStage5Panel680Loop:
+        move.l  (a0)+,(a1)
+        dbf     d0,HudStage5Panel680Loop
+
+        lea     (HudStage5PanelTiles6A8).l,a0
+        move.l  #HUD_STAGE5_PANEL_6A8_COMMAND,(VDP_CTRL).l
+        moveq   #$17,d0                  ; 24 longs = tiles $6A8-$6AA
+HudStage5Panel6A8Loop:
+        move.l  (a0)+,(a1)
+        dbf     d0,HudStage5Panel6A8Loop
+        movem.l (sp)+,d0/a0-a1
+        rts
+
+        even
+HudStage5PanelTiles680:
+        ; Tiles $680-$684.
+        dc.l    $13FBBBBB,$1EFBBBBB,$1EFBBBBB,$1EFBBBBB
+        dc.l    $1EFBBBBB,$13FBBBBB,$13FBBBBB,$13FBBBBB
+        dc.l    $11111111,$3E33EEE3,$FFFFFFFF,$BBBBBBBB
+        dc.l    $BBBBBBBB,$BBBBBBBB,$BBBBBBBB,$BBBBBBBB
+        dc.l    $BBBBBBBB,$BBBBBBBB,$BBBBBBBB,$BBBBBBBB
+        dc.l    $BBBBBBBB,$BBBBBBBB,$BBBBBBBB,$BBBBBBBB
+        dc.l    $11111111,$333EEEE1,$FFFFFFE1,$BBBBB6E1
+        dc.l    $BBBBB6E1,$BBBBB6E1,$BBBBB6E1,$BBBBB631
+        dc.l    $BBBBB631,$BBBBB6E1,$BBBBB6E1,$BBBBB6E1
+        dc.l    $BBBBB631,$BBBBB631,$BBBBB6E1,$BBBBB6E1
+
+HudStage5PanelTiles6A8:
+        ; Tiles $6A8-$6AA.
+        dc.l    $1EFBBBBB,$1EFBBBBB,$1EFBBBBB,$13FBBBBB
+        dc.l    $1EFBBBBB,$1EF66666,$1EEEEE33,$11111111
+        dc.l    $BBBBBBBB,$BBBBBBBB,$BBBBBBBB,$BBBBBBBB
+        dc.l    $BBBBBBBB,$66666666,$33EE3EE3,$11111111
+        dc.l    $BBBBB6E1,$BBBBB6E1,$BBBBB6E1,$BBBBB631
+        dc.l    $BBBBB6E1,$666666E1,$33333EE1,$11111111
 
 ; Three-button guard compatibility helper.  Reproduce the displaced dash-state
 ; copy, then preserve the original patch's guard+B behavior.  The standalone
